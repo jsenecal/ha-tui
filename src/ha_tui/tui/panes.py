@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from rich.text import Text
-from textual import on
+from textual import events, on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
@@ -15,6 +15,7 @@ from textual.timer import Timer
 from textual.widgets import DataTable, Input, RichLog, Static, Switch
 
 from ..format import domain_of, humanize_time, icon, state_style, state_text
+from .widgets import EntityList
 
 if TYPE_CHECKING:
     from ..hass import Hass
@@ -117,6 +118,12 @@ class EntitiesPane(Vertical):
         if event.row_key.value:
             self.post_message(self.Open(event.row_key.value))
 
+    def on_key(self, event: events.Key) -> None:
+        table = self.query_one("#entities", DataTable)
+        if event.key == "h" and table.has_focus and table.row_count:
+            event.stop()
+            self.post_message(EntityList.History(table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value))
+
     def entity_updated(self, eid: str) -> None:
         if eid not in self._shown:
             return
@@ -157,9 +164,12 @@ class ActivityPane(Vertical):
     def record(self, new: dict[str, Any], old: dict[str, Any] | None) -> None:
         eid = new["entity_id"]
         same = old is not None and old.get("state") == new.get("state")
-        if same and not self.query_one("#attributes", Switch).value:
+        # Updates can arrive before the pane has composed its controls.
+        switch = next(iter(self.query("#attributes").results(Switch)), None)
+        if same and not (switch is not None and switch.value):
             return
-        term = self.query_one("#activity-filter", Input).value.casefold().strip()
+        field = next(iter(self.query("#activity-filter").results(Input)), None)
+        term = field.value.casefold().strip() if field is not None else ""
         if term and term not in eid and term not in self.hass.name(eid).casefold():
             return
         line = Text.assemble(
@@ -179,8 +189,8 @@ class ActivityPane(Vertical):
             line.append("  (attributes)", style="dim italic")
         self.entries.append(line)
         # A hidden RichLog queues writes without limit; replay from `entries` on show instead.
-        if self.display:
-            self.query_one("#log", RichLog).write(line)
+        if self.display and (log := next(iter(self.query("#log").results(RichLog)), None)) is not None:
+            log.write(line)
 
     def on_show(self) -> None:
         log = self.query_one("#log", RichLog)

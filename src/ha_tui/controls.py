@@ -281,14 +281,14 @@ def actions_for(entity_id: str, state: State) -> list[Action]:
         acts += [
             Action("s", "Start", "vacuum.start"),
             Action("p", "Pause", "vacuum.pause"),
-            Action("h", "Return home", "vacuum.return_to_base"),
+            Action("b", "Return to base", "vacuum.return_to_base"),
             Action("l", "Locate", "vacuum.locate"),
         ]
     elif domain == "lawn_mower":
         acts += [
             Action("s", "Start", "lawn_mower.start_mowing"),
             Action("p", "Pause", "lawn_mower.pause"),
-            Action("h", "Dock", "lawn_mower.dock"),
+            Action("b", "Dock", "lawn_mower.dock"),
         ]
     elif domain in ("number", "input_number"):
         down = _step_attr("_value", "step", 1, -1, "value", "min", "max")
@@ -326,7 +326,7 @@ def actions_for(entity_id: str, state: State) -> list[Action]:
     elif domain == "alarm_control_panel":
         acts += [
             Action("d", "Disarm", "alarm_control_panel.alarm_disarm"),
-            Action("h", "Arm home", "alarm_control_panel.alarm_arm_home"),
+            Action("m", "Arm home", "alarm_control_panel.alarm_arm_home"),
             Action("a", "Arm away", "alarm_control_panel.alarm_arm_away"),
             Action("n", "Arm night", "alarm_control_panel.alarm_arm_night"),
         ]

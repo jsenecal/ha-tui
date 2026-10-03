@@ -10,6 +10,7 @@ dependencies = [
     "typer>=0.12",
     "rich>=13.7",
     "websockets>=13.0",
+    "textual-plotext>=1.0",
 ]
 
 [dependency-groups]

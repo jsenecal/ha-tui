@@ -52,6 +52,7 @@ class MoreInfo(ModalScreen[None]):
     MoreInfo .field Select, MoreInfo .field Input { width: 1fr; }
     MoreInfo #history { height: auto; margin-bottom: 1; }
     MoreInfo #history Sparkline { height: 3; }
+    MoreInfo #open-history { margin-bottom: 1; }
     MoreInfo #attrs { height: auto; max-height: 14; border-top: solid $panel-lighten-2; padding-top: 1; }
     """
     BINDINGS = [Binding("escape,q", "dismiss", "Close")]
@@ -108,6 +109,7 @@ class MoreInfo(ModalScreen[None]):
                         placeholder="press Enter to apply",
                     )
             yield Vertical(id="history")
+            yield Button("Full history (h)", id="open-history", compact=True)
             yield Static(id="attrs")
 
     def on_mount(self) -> None:
@@ -186,7 +188,7 @@ class MoreInfo(ModalScreen[None]):
         )
 
     # ------------------------------------------------------------------ #
-    def run_action(self, action: Action) -> None:
+    def perform(self, action: Action) -> None:
         data = action.resolve(self.state)
         if data is None:
             self.notify(f"{action.label}: not supported in the current state", severity="warning")
@@ -196,22 +198,37 @@ class MoreInfo(ModalScreen[None]):
         domain, service = action.service.split(".", 1)
         self.ha.call(domain, service, self.entity_id, data)
 
+    def open_history(self) -> None:
+        from .history import HistoryScreen
+
+        self.app.push_screen(HistoryScreen(self.entity_id))
+
+    @on(Button.Pressed, "#open-history")
+    def _history_button(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.open_history()
+
     @on(Button.Pressed)
     def _button(self, event: Button.Pressed) -> None:
         key = (event.button.id or "").removeprefix("act-")
         if action := self.actions.get(key):
-            self.run_action(action)
+            self.perform(action)
 
     def on_key(self, event: events.Key) -> None:
         if isinstance(self.focused, Input) and event.key not in ("escape",):
             return
         key = KEY_ALIASES.get(event.key, event.key)
+        if key == "h":
+            event.stop()
+            event.prevent_default()
+            self.open_history()
+            return
         if isinstance(self.focused, (Button, Select)) and key in ("enter", "space"):
             return
         if action := self.actions.get(key):
             event.stop()
             event.prevent_default()
-            self.run_action(action)
+            self.perform(action)
 
     @on(Select.Changed)
     def _choice(self, event: Select.Changed) -> None:

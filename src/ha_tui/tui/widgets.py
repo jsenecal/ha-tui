@@ -77,6 +77,11 @@ class EntityList(OptionList):
     EntityList:blur > .option-list--option-highlighted { background: transparent; text-style: none; }
     """
 
+    class History(Message):
+        def __init__(self, entity_id: str) -> None:
+            super().__init__()
+            self.entity_id = entity_id
+
     class Activated(Message):
         def __init__(self, item: Item, quick: bool) -> None:
             super().__init__()
@@ -126,6 +131,10 @@ class EntityList(OptionList):
         self.post_message(self.Activated(self.items[event.option_index], quick=False))
 
     async def on_key(self, event: events.Key) -> None:
+        if event.key == "h" and (item := self.current_item()) is not None and item.entity_id:
+            event.stop()
+            self.post_message(self.History(item.entity_id))
+            return
         if event.key in ("space", "t") and (item := self.current_item()) is not None:
             event.stop()
             self.post_message(self.Activated(item, quick=True))

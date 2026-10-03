@@ -51,6 +51,7 @@ ha-tui tui -D <url_path> -V <view>   # another dashboard / view
 | `tab` | next card |
 | `space` / `t` | quick action: toggle, run scene/script, press button, play/pause… |
 | `enter` | open the entity's controls; on an area or summary, open its view |
+| `h` | history of the selected entity (also in the controls dialog and the entities list) |
 | `esc` | back to the previous view |
 | `/` or `ctrl+p` | search entities, cards and services |
 | `:` | service console (prefilled with the selected entity) |
@@ -66,6 +67,13 @@ ha-tui tui -D <url_path> -V <view>   # another dashboard / view
 media…), selects for modes/presets/effects/sources, direct value input
 (brightness %, target, position, number/text helpers, alarm code),
 a 24h history sparkline for numeric entities, and all attributes.
+
+**History** (`h`) — numeric sensors get a line chart with min / time-weighted
+average / max; everything else gets a coloured state timeline (brief events
+stay visible), time spent per state, and the list of changes with durations.
+`1`–`6` switch between 1h, 6h, 24h, 3d, 7d and 30d; 30 days uses the
+recorder's hourly long-term statistics (mean with min–max) when the sensor has
+them, since raw history is purged after 10 days by default. Updates live.
 
 Live updates come from the `state_changed` subscription; the connection
 reconnects automatically with backoff and resyncs state.
@@ -84,6 +92,7 @@ ha-tui dashboards
 ha-tui dashboard [URL_PATH] [-V VIEW]  # the resolved dashboard as a tree
 ha-tui watch [PATTERN] [-d DOMAIN]     # live state changes
 ha-tui template "{{ states('sun.sun') }}"
+ha-tui history ENTITY [-r 1h|6h|24h|3d|7d|30d]   # chart, or timeline + changes
 ```
 
 ## Development

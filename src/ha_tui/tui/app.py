@@ -11,6 +11,7 @@ from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.dom import DOMNode
 from textual.screen import ModalScreen, Screen
 from textual.widgets import ContentSwitcher, Footer, Header, LoadingIndicator, OptionList, Static, Tab, Tabs
 from textual.widgets.option_list import Option
@@ -23,6 +24,7 @@ from ..lovelace.model import Dashboard, View
 from ..lovelace.resolve import default_dashboard, load_dashboard
 from .commands import CardCommands, EntityCommands, ServiceCommands
 from .console import ServiceConsole
+from .history import HistoryScreen
 from .more_info import MoreInfo
 from .panes import ActivityPane, EntitiesPane
 from .widgets import EntityList, MarkdownBlock, ViewWidget
@@ -101,6 +103,10 @@ class HATuiApp(App):
         self.sub_title = urlparse(self.settings.url).netloc
         self.connect()
 
+    def _main(self) -> DOMNode:
+        """The dashboard screen. `self.query` would search whatever dialog is on top instead."""
+        return self.screen_stack[0] if self.screen_stack else self
+
     @property
     def top_screen(self) -> Screen | None:
         """Like `self.screen`, but None instead of raising while the app shuts down."""
@@ -118,7 +124,7 @@ class HATuiApp(App):
         host = urlparse(self.settings.url).netloc
         self.sub_title = f"{host} · {text}"
         if not self._loaded:
-            self.query_one("#status", Static).update(text)
+            self._main().query_one("#status", Static).update(text)
 
     @work(exclusive=True, group="connection")
     async def connect(self) -> None:
@@ -156,7 +162,7 @@ class HATuiApp(App):
     async def _first_load(self) -> None:
         self._set_status("building dashboard…")
         await self.load_dashboard()
-        main = self.query_one("#main", ContentSwitcher)
+        main = self._main().query_one("#main", ContentSwitcher)
         await main.add_content(EntitiesPane(self.hass, id="entities"))
         await main.add_content(ActivityPane(self.hass, id="activity"))
         main.current = "dashboard"
@@ -176,7 +182,7 @@ class HATuiApp(App):
             self.dashboard = Dashboard(url_path=self.dashboard_path, title="Overview")
         self.title = self.dashboard.title
         visible = [v for v in self.dashboard.views if not v.subview]
-        tabs = self.query_one("#view-tabs", Tabs)
+        tabs = self._main().query_one("#view-tabs", Tabs)
         await tabs.clear()
         for view in visible:
             await tabs.add_tab(Tab(view.title, id=f"view-{view.path}"))
@@ -188,7 +194,7 @@ class HATuiApp(App):
         await self.show_view(target)
 
     def active_view(self) -> ViewWidget | None:
-        views = [v for v in self.query("#view-host > ViewWidget").results(ViewWidget) if v.is_attached]
+        views = [v for v in self._main().query("#view-host > ViewWidget").results(ViewWidget) if v.is_attached]
         return views[-1] if views else None
 
     async def show_view(self, view: View | None, push: bool = False) -> None:
@@ -197,7 +203,7 @@ class HATuiApp(App):
             if push and self.current_view is not None:
                 self.history.append(self.current_view.path)
             self.current_view = view
-            host = self.query_one("#view-host", Vertical)
+            host = self._main().query_one("#view-host", Vertical)
             await host.remove_children()
             self._rows.clear()
             if view is None:
@@ -206,7 +212,7 @@ class HATuiApp(App):
                 notice = self.dashboard.notice if self.dashboard else None
                 await host.mount(ViewWidget(view, self.hass, notice=notice))
                 if not view.subview:
-                    tabs = self.query_one("#view-tabs", Tabs)
+                    tabs = self._main().query_one("#view-tabs", Tabs)
                     with tabs.prevent(Tabs.TabActivated):
                         tabs.active = f"view-{view.path}"
             self.refresh_sidebar()
@@ -214,13 +220,15 @@ class HATuiApp(App):
     @on(ViewWidget.Laidout)
     def _index_rows(self) -> None:
         self._rows.clear()
-        for lst in self.query(EntityList):
+        for lst in self._main().query(EntityList):
             for index, item in enumerate(lst.items):
                 for eid in {item.entity_id, *item.members} - {None}:
                     self._rows.setdefault(eid, []).append((lst, index))
-        if self.focused is None or self.focused is self.query_one("#sidebar"):
-            first = next(iter(self.query("#view-host EntityList")), None)
-            if first is not None and self.query_one("#main", ContentSwitcher).current == "dashboard":
+                # States may have changed between composing these rows and indexing them.
+                lst.refresh_item(index)
+        if self.focused is None or self.focused is self._main().query_one("#sidebar"):
+            first = next(iter(self._main().query("#view-host EntityList")), None)
+            if first is not None and self._main().query_one("#main", ContentSwitcher).current == "dashboard":
                 first.focus()
 
     @on(Tabs.TabActivated, "#view-tabs")
@@ -246,18 +254,18 @@ class HATuiApp(App):
             self._buffer.append((new, old))
             return
         self.hass.apply_state(new)
-        for pane in self.query(ActivityPane):
+        for pane in self._main().query(ActivityPane):
             pane.record(new, old)
         self._pending.add(new["entity_id"])
         if not self._flush_scheduled:
             self._flush_scheduled = True
-            self.set_timer(0.1, self._flush)
+            self.set_timer(0.1, self._flush_updates)
 
-    def _flush(self) -> None:
+    def _flush_updates(self) -> None:
         self._flush_scheduled = False
         pending, self._pending = self._pending, set()
         view = self.active_view()
-        entities = next(iter(self.query(EntitiesPane)), None)
+        entities = next(iter(self._main().query(EntitiesPane)), None)
         for eid in pending:
             for lst, index in self._rows.get(eid, []):
                 if lst.is_attached:
@@ -267,13 +275,13 @@ class HATuiApp(App):
             if entities is not None:
                 entities.entity_updated(eid)
         top = self.top_screen
-        if isinstance(top, MoreInfo) and top.entity_id in pending:
+        if isinstance(top, (MoreInfo, HistoryScreen)) and top.entity_id in pending:
             top.entity_updated()
 
     def refresh_all_rows(self) -> None:
         self._pending.update(self.hass.states)
         self._pending.update(self._rows)
-        self._flush()
+        self._flush_updates()
 
     # ------------------------------------------------------------------ #
     # actions
@@ -324,6 +332,13 @@ class HATuiApp(App):
     def open_more_info(self, entity_id: str) -> None:
         self.push_screen(MoreInfo(entity_id))
 
+    @on(EntityList.History)
+    def _history(self, event: EntityList.History) -> None:
+        self.open_history(event.entity_id)
+
+    def open_history(self, entity_id: str) -> None:
+        self.push_screen(HistoryScreen(entity_id))
+
     def open_console(self, service: str = "", target: str = "") -> None:
         self.push_screen(ServiceConsole(service, target))
 
@@ -335,21 +350,21 @@ class HATuiApp(App):
         self.open_console("", target)
 
     def action_show_pane(self, pane: str) -> None:
-        self.query_one("#main", ContentSwitcher).current = pane
+        self._main().query_one("#main", ContentSwitcher).current = pane
         if pane == "entities":
-            self.query_one("#entities DataTable").focus()
+            self._main().query_one("#entities DataTable").focus()
         elif pane == "dashboard":
-            first = next(iter(self.query("#view-host EntityList")), None)
+            first = next(iter(self._main().query("#view-host EntityList")), None)
             if first is not None:
                 first.focus()
         self.refresh_sidebar()
 
     def action_filter_entities(self) -> None:
         self.action_show_pane("entities")
-        self.query_one(EntitiesPane).focus_filter()
+        self._main().query_one(EntitiesPane).focus_filter()
 
     def action_toggle_sidebar(self) -> None:
-        self.query_one("#sidebar").toggle_class("hidden")
+        self._main().query_one("#sidebar").toggle_class("hidden")
 
     async def action_back(self) -> None:
         if self.history and self.dashboard:
@@ -360,7 +375,7 @@ class HATuiApp(App):
         self.notify("Reloading…", timeout=1)
         await self.refresh_hass()
         await self.load_dashboard()
-        self.query_one(EntitiesPane).populate()
+        self._main().query_one(EntitiesPane).populate()
 
     # ------------------------------------------------------------------ #
     # sidebar
@@ -371,8 +386,8 @@ class HATuiApp(App):
         return [(i, c.title) for i, c in enumerate(self.current_view.cards) if c.title]
 
     def refresh_sidebar(self) -> None:
-        sidebar = self.query_one("#sidebar", OptionList)
-        current = self.query_one("#main", ContentSwitcher).current
+        sidebar = self._main().query_one("#sidebar", OptionList)
+        current = self._main().query_one("#main", ContentSwitcher).current
         sidebar.clear_options()
         for key, label in PANES.items():
             marker = "▸ " if key == current else "  "

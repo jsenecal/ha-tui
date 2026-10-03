@@ -40,6 +40,7 @@ def initial_states() -> list[dict[str, Any]]:
             friendly_name="Kitchen Temperature",
             unit_of_measurement="°C",
             device_class="temperature",
+            state_class="measurement",
         ),
         _state(
             "climate.thermostat",
@@ -144,6 +145,7 @@ class MockHA:
         self.panels = ["lovelace", "home", "light", "climate", "security", "maintenance"]
         self.home_config: dict[str, Any] | None = None
         self.history_delay = 0.0
+        self.history_requests: list[dict[str, Any]] = []
         self.server: Server | None = None
         self.port = 0
         self.connections: set[ServerConnection] = set()
@@ -255,8 +257,35 @@ class MockHA:
             await ok({"issues": [{"issue_id": "a", "ignored": False}, {"issue_id": "b", "ignored": True}]})
         elif mtype == "history/history_during_period":
             await asyncio.sleep(self.history_delay)
+            self.history_requests.append(msg)
             eid = msg["entity_ids"][0]
-            await ok({eid: [{"s": str(v), "lu": 0} for v in (20, 21, 21.5, 22, 21.5)]})
+            start = datetime.fromisoformat(msg["start_time"]).timestamp()
+            end = datetime.fromisoformat(msg["end_time"]).timestamp() if msg.get("end_time") else start + 86400
+            current = self.states.get(eid, {}).get("state", "")
+            try:
+                float(current)
+                values = ["20", "21", "unavailable", "21.5", "22", current]
+            except ValueError:
+                # a brief "on" in the middle of a long "off", as motion/door sensors do
+                values = ["off", "on", "off", current]
+            step = (end - start) / len(values)
+            points = [{"s": v, "lu": start + i * step} for i, v in enumerate(values)]
+            if len(values) == 4:
+                points[2]["lu"] = points[1]["lu"] + 5
+            await ok({eid: points})
+        elif mtype == "recorder/statistics_during_period":
+            eid = msg["statistic_ids"][0]
+            start = datetime.fromisoformat(msg["start_time"]).timestamp()
+            rows = [
+                {
+                    "start": (start + h * 3600) * 1000,
+                    "mean": 20 + (h % 5) * 0.5,
+                    "min": 19 + (h % 5) * 0.5,
+                    "max": 21 + (h % 5) * 0.5,
+                }
+                for h in range(48)
+            ]
+            await ok({eid: rows})
         elif mtype == "call_service":
             await self._call_service(msg, ok, fail)
         else:

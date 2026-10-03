@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -21,8 +22,19 @@ from rich.tree import Tree
 from . import __version__
 from .client import HAClient, HAError
 from .config import CONFIG_PATH, ConfigError, Settings, load_settings, read_file, save_settings
-from .format import domain_of, humanize_time, icon, styled_state
+from .format import domain_of, humanize_time, icon, state_text, styled_state
 from .hass import Hass
+from .history import (
+    RANGES,
+    fetch,
+    format_duration,
+    numeric_stats,
+    segments,
+    state_color,
+    state_totals,
+    time_ticks,
+    timeline_text,
+)
 from .lovelace.home import SUMMARY_ICONS, SUMMARY_LABELS, area_text, summary_text
 from .lovelace.resolve import default_dashboard, list_dashboards, load_dashboard
 
@@ -532,3 +544,91 @@ def watch(
             await asyncio.Event().wait()
 
     run(ctx, go)
+
+
+@app.command()
+def history(
+    ctx: typer.Context,
+    entity: Annotated[str, typer.Argument(help="Entity id or name.")],
+    span: Annotated[str, typer.Option("--range", "-r", help="1h, 6h, 24h, 3d, 7d or 30d.")] = "24h",
+    changes: Annotated[int, typer.Option(help="State changes to list (non-numeric entities).")] = 15,
+    height: Annotated[int, typer.Option(help="Chart height in rows.")] = 18,
+) -> None:
+    """Show an entity's history: a chart for numeric sensors, a timeline otherwise."""
+    seconds = dict(RANGES).get(span)
+    if seconds is None:
+        raise typer.BadParameter(f"--range must be one of {', '.join(r for r, _ in RANGES)}")
+
+    async def go(client: HAClient) -> None:
+        hass = await Hass.load(client)
+        eid = resolve_entity(hass, entity)
+        st = hass.states.get(eid)
+        series = await fetch(client, eid, seconds, st)
+        console.print(f"{icon(st, eid)} [b]{hass.name(eid)}[/b] [dim]{eid} · last {span}[/dim]")
+        if not series.points:
+            console.print("[dim]No history in this range.[/dim]")
+            return
+        width = max(40, console.width)
+        if series.numeric:
+            unit = (st or {}).get("attributes", {}).get("unit_of_measurement") or ""
+            console.print(Text.from_ansi(render_chart(series, width, height, unit)))
+            if stats := numeric_stats(series):
+                source = "hourly statistics" if series.source == "statistics" else f"{stats.changes} changes"
+                console.print(
+                    f"min [b]{stats.minimum:.2f}{unit}[/b]  avg [b]{stats.average:.2f}{unit}[/b]  "
+                    f"max [b]{stats.maximum:.2f}{unit}[/b]  now [b]{stats.last}{unit}[/b]  [dim]· {source}[/dim]"
+                )
+            return
+        colors: dict[str, str] = {}
+        console.print(timeline_text(series, width, colors))
+        span_s = series.end - series.start
+        totals = Table(box=None, header_style="bold", pad_edge=False)
+        for col in ("", "State", "Time", "Share"):
+            totals.add_column(col, justify="right" if col in ("Time", "Share") else "left")
+        for state_value, secs in state_totals(series):
+            shown = state_text({**(st or {}), "state": state_value}, eid)
+            totals.add_row(
+                Text("■", style=state_color(state_value, colors)), shown, format_duration(secs), f"{secs / span_s:.0%}"
+            )
+        console.print(totals)
+        recent = Table(box=None, header_style="bold", pad_edge=False, title="Recent changes", title_justify="left")
+        recent.add_column("When", style="dim")
+        recent.add_column("State")
+        recent.add_column("For", justify="right")
+        for seg in list(reversed(segments(series)))[:changes]:
+            when = datetime.fromtimestamp(seg.start).strftime("%a %b %d %H:%M:%S")
+            shown = state_text({**(st or {}), "state": seg.state}, eid)
+            recent.add_row(when, Text(shown, style=state_color(seg.state, colors)), format_duration(seg.duration))
+        console.print(recent)
+
+    run(ctx, go)
+
+
+def render_chart(series, width: int, height: int, unit: str) -> str:
+    """A plotext braille line chart of a numeric series, as ANSI text."""
+    import plotext as plt
+
+    plt.clear_figure()
+    plt.plotsize(width, height)
+    plt.theme("clear")
+    timeline = [*series.numeric_points(), (series.end, None)]
+    run_x: list[float] = []
+    run_y: list[float] = []
+    for (t, v), (t_next, _) in itertools.pairwise(timeline):
+        if v is None:
+            if run_x:
+                plt.plot(run_x, run_y, marker="braille", color="cyan")
+            run_x, run_y = [], []
+            continue
+        run_x.append(t)
+        run_y.append(v)
+        if t_next == series.end:
+            run_x.append(t_next)
+            run_y.append(v)
+    if run_x:
+        plt.plot(run_x, run_y, marker="braille", color="cyan")
+    ticks = time_ticks(series.start, series.end, max(2, width // 14))
+    plt.xticks([t for t, _ in ticks], [label for _, label in ticks])
+    plt.xlim(series.start, series.end)
+    plt.ylabel(unit)
+    return plt.build()

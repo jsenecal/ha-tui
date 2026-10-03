@@ -27,11 +27,11 @@ def make_app(mock: MockHA, dashboard: str | None = "default") -> HATuiApp:
 
 
 def has_card(app: HATuiApp, title: str) -> bool:
-    return any(c.card.title == title and c.query(EntityList) for c in app.query(CardWidget))
+    return any(c.card.title == title and c.query(EntityList) for c in app._main().query(CardWidget))
 
 
 def row_states(app: HATuiApp, title: str) -> list[str]:
-    card = next(c for c in app.query(CardWidget) if c.card.title == title)
+    card = next(c for c in app._main().query(CardWidget) if c.card.title == title)
     lst = card.query_one(EntityList)
     out = []
     for option in lst.options:
@@ -186,3 +186,17 @@ async def test_rapid_view_switching(mock_ha: MockHA):
         await pilot.pause(0.5)
         assert app._exception is None
         assert app.query(CardWidget)
+
+
+async def test_updates_while_dialog_open(mock_ha: MockHA):
+    """Regression: live updates looked up widgets on the top screen, so a dialog hid the dashboard from them."""
+    app = make_app(mock_ha)
+    async with app.run_test(size=(140, 50)) as pilot:
+        await wait_for(pilot, lambda: app._loaded and has_card(app, "Kitchen"))
+        app.open_more_info("light.kitchen")
+        await wait_for(pilot, lambda: isinstance(app.screen, MoreInfo))
+        await mock_ha.set_state("switch.coffee", "on")
+        await wait_for(
+            pilot, lambda: any("Coffee" in line.plain for line in app._main().query_one(ActivityPane).entries)
+        )
+        await wait_for(pilot, lambda: row_states(app, "Kitchen")[1] == "On")
