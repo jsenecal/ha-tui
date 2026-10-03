@@ -25,7 +25,14 @@ def initial_states() -> list[dict[str, Any]]:
         _state(
             "light.kitchen", "on", friendly_name="Kitchen Ceiling", brightness=128, supported_color_modes=["brightness"]
         ),
-        _state("light.living_room", "off", friendly_name="Living Room Lamp", supported_color_modes=["color_temp"]),
+        _state(
+            "light.living_room",
+            "off",
+            friendly_name="Living Room Lamp",
+            supported_color_modes=["color_temp"],
+            effect_list=["None", "Candle"],
+            effect=None,
+        ),
         _state("switch.coffee", "off", friendly_name="Kitchen Coffee Maker"),
         _state(
             "sensor.kitchen_temp",

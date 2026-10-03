@@ -26,6 +26,10 @@ def make_app(mock: MockHA, dashboard: str | None = None) -> HATuiApp:
     return HATuiApp(Settings(url=mock.url, token=TOKEN), dashboard=dashboard)
 
 
+def has_card(app: HATuiApp, title: str) -> bool:
+    return any(c.card.title == title and c.query(EntityList) for c in app.query(CardWidget))
+
+
 def row_states(app: HATuiApp, title: str) -> list[str]:
     card = next(c for c in app.query(CardWidget) if c.card.title == title)
     lst = card.query_one(EntityList)
@@ -39,7 +43,7 @@ def row_states(app: HATuiApp, title: str) -> list[str]:
 async def test_overview_renders_and_toggles(mock_ha: MockHA):
     app = make_app(mock_ha)
     async with app.run_test(size=(140, 50)) as pilot:
-        await wait_for(pilot, lambda: app._loaded and len(app.query(CardWidget)) == 5)
+        await wait_for(pilot, lambda: app._loaded and len(app.query(CardWidget)) == 5 and has_card(app, "Kitchen"))
         titles = [c.card.title for c in app.query(CardWidget)]
         assert "Living Room" in titles and "Kitchen" in titles
         assert row_states(app, "Kitchen")[0] == "On · 50%"
@@ -56,7 +60,7 @@ async def test_overview_renders_and_toggles(mock_ha: MockHA):
 async def test_external_change_updates_row_and_activity(mock_ha: MockHA):
     app = make_app(mock_ha)
     async with app.run_test(size=(140, 50)) as pilot:
-        await wait_for(pilot, lambda: app._loaded and app.query(CardWidget))
+        await wait_for(pilot, lambda: app._loaded and has_card(app, "Kitchen"))
         await mock_ha.set_state("switch.coffee", "on")
         await wait_for(pilot, lambda: row_states(app, "Kitchen")[1] == "On")
         assert any("Coffee" in line.plain for line in app.query_one(ActivityPane).entries)
@@ -86,7 +90,7 @@ async def test_more_info_controls(mock_ha: MockHA):
 async def test_enter_opens_more_info_and_light_brightness(mock_ha: MockHA):
     app = make_app(mock_ha)
     async with app.run_test(size=(140, 50)) as pilot:
-        await wait_for(pilot, lambda: app._loaded and app.query(CardWidget))
+        await wait_for(pilot, lambda: app._loaded and has_card(app, "Kitchen"))
         kitchen = next(c for c in app.query(CardWidget) if c.card.title == "Kitchen").query_one(EntityList)
         kitchen.focus()
         kitchen.highlighted = 0
@@ -141,3 +145,16 @@ async def test_custom_dashboard_markdown_template(mock_ha: MockHA):
         block = app.query_one(MarkdownBlock)
         await wait_for(pilot, lambda: block.unsubscribe is not None)
         assert "Hello 12" in block.content.markup  # type: ignore[union-attr]
+
+
+async def test_more_info_with_unset_select(mock_ha: MockHA):
+    """Regression: a select with no current value (light off, effect=None) crashed the dialog."""
+    app = make_app(mock_ha)
+    async with app.run_test(size=(140, 50)) as pilot:
+        await wait_for(pilot, lambda: app._loaded)
+        app.open_more_info("light.living_room")
+        await wait_for(pilot, lambda: isinstance(app.screen, MoreInfo) and app.screen.query("#choice-0"))
+        select = app.screen.query_one("#choice-0", Select)
+        assert select.value is Select.NULL
+        select.value = "Candle"
+        await wait_for(pilot, lambda: mock_ha.calls and mock_ha.calls[-1]["service_data"] == {"effect": "Candle"})

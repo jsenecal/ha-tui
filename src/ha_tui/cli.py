@@ -150,6 +150,8 @@ def tui(
     """Open the interactive dashboard (default)."""
     from .tui.app import HATuiApp
 
+    # Without a handler, logging's last-resort stderr output would draw over the TUI.
+    logging.getLogger("ha_tui").addHandler(logging.NullHandler())
     settings = ctx.obj.settings()
     HATuiApp(settings, dashboard=dashboard or settings.dashboard, view=view).run()
 

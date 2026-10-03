@@ -11,7 +11,7 @@ from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.screen import ModalScreen
+from textual.screen import ModalScreen, Screen
 from textual.widgets import ContentSwitcher, Footer, Header, LoadingIndicator, OptionList, Static, Tab, Tabs
 from textual.widgets.option_list import Option
 
@@ -99,8 +99,13 @@ class HATuiApp(App):
         self.sub_title = urlparse(self.settings.url).netloc
         self.connect()
 
+    @property
+    def top_screen(self) -> Screen | None:
+        """Like `self.screen`, but None instead of raising while the app shuts down."""
+        return self.screen_stack[-1] if self.screen_stack else None
+
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        if isinstance(self.screen, ModalScreen) and action not in ("quit", "command_palette"):
+        if isinstance(self.top_screen, ModalScreen) and action not in ("quit", "command_palette"):
             return False
         return self._loaded or action == "quit"
 
@@ -214,8 +219,8 @@ class HATuiApp(App):
     # ------------------------------------------------------------------ #
     def _on_state_changed(self, new: dict[str, Any], old: dict[str, Any] | None) -> None:
         self.hass.apply_state(new)
-        if self._loaded:
-            self.query_one(ActivityPane).record(new, old)
+        for pane in self.query(ActivityPane):
+            pane.record(new, old)
         self._pending.add(new["entity_id"])
         if not self._flush_scheduled:
             self._flush_scheduled = True
@@ -224,8 +229,8 @@ class HATuiApp(App):
     def _flush(self) -> None:
         self._flush_scheduled = False
         pending, self._pending = self._pending, set()
-        view = self.query("#view").first(ViewWidget) if self.query("#view") else None
-        entities = self.query(EntitiesPane).first() if self._loaded else None
+        view = next(iter(self.query("#view").results(ViewWidget)), None)
+        entities = next(iter(self.query(EntitiesPane)), None)
         for eid in pending:
             for lst, index in self._rows.get(eid, []):
                 if lst.is_attached:
@@ -234,8 +239,9 @@ class HATuiApp(App):
                 view.refresh_badges(eid)
             if entities is not None:
                 entities.entity_updated(eid)
-        if isinstance(self.screen, MoreInfo) and self.screen.entity_id in pending:
-            self.screen.entity_updated()
+        top = self.top_screen
+        if isinstance(top, MoreInfo) and top.entity_id in pending:
+            top.entity_updated()
 
     def refresh_all_rows(self) -> None:
         self._pending.update(self.hass.states)

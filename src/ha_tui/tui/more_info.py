@@ -93,7 +93,7 @@ class MoreInfo(ModalScreen[None]):
                     yield Label(choice.label)
                     yield Select(
                         [(o, o) for o in choice.options],
-                        value=choice.current if choice.current in choice.options else Select.BLANK,
+                        value=choice.current if choice.current in choice.options else Select.NULL,
                         id=f"choice-{i}",
                         allow_blank=choice.current not in choice.options,
                     )
@@ -214,7 +214,7 @@ class MoreInfo(ModalScreen[None]):
     def _choice(self, event: Select.Changed) -> None:
         index = int((event.select.id or "choice-0").removeprefix("choice-"))
         choice = self.choices[index]
-        if event.value is Select.BLANK or event.value == choice.current:
+        if event.value is Select.NULL or event.value == choice.current:
             return
         domain, service = choice.service.split(".", 1)
         self.ha.call(domain, service, self.entity_id, {choice.field: event.value})
