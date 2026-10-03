@@ -171,7 +171,10 @@ class MoreInfo(ModalScreen[None]):
             return
         unit = st.get("attributes", {}).get("unit_of_measurement") or ""
         avg = sum(data) / len(data)
-        box = self.query_one("#history", Vertical)
+        # The dialog may have been closed while history was loading.
+        box = next(iter(self.query("#history").results(Vertical)), None)
+        if box is None or not self.is_attached:
+            return
         await box.mount(
             Static(
                 Text.assemble(

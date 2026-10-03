@@ -54,6 +54,12 @@ class Hass:
     floors: dict[str, dict[str, Any]] = field(default_factory=dict)
     config: dict[str, Any] = field(default_factory=dict)
     services: dict[str, dict[str, Any]] = field(default_factory=dict)
+    panels: set[str] = field(default_factory=set)
+    user_name: str | None = None
+    is_admin: bool = False
+    # Home panel context, loaded with the home dashboard.
+    common_controls: list[str] = field(default_factory=list)
+    repairs_count: int = 0
 
     @classmethod
     async def load(cls, client: HAClient) -> Hass:
@@ -62,7 +68,7 @@ class Hass:
         return hass
 
     async def refresh(self, client: HAClient) -> None:
-        states, entities, devices, areas, floors, config, services = await asyncio.gather(
+        states, entities, devices, areas, floors, config, services, panels, user = await asyncio.gather(
             client.get_states(),
             client.entity_registry_display(),
             client.device_registry(),
@@ -70,7 +76,12 @@ class Hass:
             client.floor_registry(),
             client.get_config(),
             client.get_services(),
+            client.send("get_panels"),
+            client.send("auth/current_user"),
         )
+        self.panels = set(panels or {})
+        self.user_name = (user or {}).get("name")
+        self.is_admin = bool((user or {}).get("is_admin"))
         self.states = {s["entity_id"]: s for s in states}
         self.entities = parse_entity_registry_display(entities)
         format.DISPLAY_PRECISION.clear()
@@ -113,6 +124,18 @@ class Hass:
     def device_name(self, device_id: str) -> str:
         device = self.devices.get(device_id, {})
         return device.get("name_by_user") or device.get("name") or "Unnamed device"
+
+    def entity_only_name(self, entity_id: str) -> str:
+        """The entity's own name without its device name (frontend name: {type: "entity"})."""
+        entry = self.entities.get(entity_id)
+        if entry and entry.name:
+            return entry.name
+        name = self.name(entity_id)
+        if entry and entry.device_id:
+            device = self.device_name(entry.device_id)
+            if name.lower().startswith(device.lower() + " ") and len(name) > len(device) + 1:
+                return name[len(device) + 1 :]
+        return name
 
     def service_names(self) -> list[str]:
         return sorted(f"{d}.{s}" for d, services in self.services.items() for s in services)

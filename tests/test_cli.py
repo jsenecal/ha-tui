@@ -70,7 +70,7 @@ def test_unknown_service(mock):
 
 
 def test_dashboard_tree(mock):
-    result = invoke(mock, "dashboard")
+    result = invoke(mock, "dashboard", "default")
     assert result.exit_code == 0, result.output
     assert "original-states" in result.output
     assert "Living Room" in result.output and "Coffee Maker" in result.output

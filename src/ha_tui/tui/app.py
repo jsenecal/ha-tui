@@ -20,7 +20,7 @@ from ..config import Settings
 from ..controls import default_action
 from ..hass import Hass
 from ..lovelace.model import Dashboard, View
-from ..lovelace.resolve import load_dashboard
+from ..lovelace.resolve import default_dashboard, load_dashboard
 from .commands import CardCommands, EntityCommands, ServiceCommands
 from .console import ServiceConsole
 from .more_info import MoreInfo
@@ -78,6 +78,8 @@ class HATuiApp(App):
         self._pending: set[str] = set()
         self._flush_scheduled = False
         self._unsubscribe: Any = None
+        self._view_lock = asyncio.Lock()
+        self._buffer: list[tuple[dict[str, Any], dict[str, Any] | None]] | None = None
         self._loaded = False
         self.client.on_disconnect(self._on_disconnect)
 
@@ -126,8 +128,10 @@ class HATuiApp(App):
                 self._set_status("connecting…")
                 await self.client.connect()
                 self._set_status("loading registries…")
-                await self.hass.refresh(self.client)
+                # Subscribe before fetching so nothing changes unseen in between.
+                self._buffer = []
                 self._unsubscribe = await self.client.subscribe_states(self._on_state_changed)
+                await self.refresh_hass()
                 break
             except HAError as exc:
                 await self.client.close()
@@ -161,6 +165,10 @@ class HATuiApp(App):
         self.refresh_bindings()
 
     async def load_dashboard(self) -> None:
+        if self.dashboard_path is None:
+            self.dashboard_path = default_dashboard(self.hass)
+        elif self.dashboard_path == "default":
+            self.dashboard_path = None
         try:
             self.dashboard = await load_dashboard(self.client, self.hass, self.dashboard_path)
         except HAError as exc:
@@ -179,33 +187,39 @@ class HATuiApp(App):
         self.history.clear()
         await self.show_view(target)
 
+    def active_view(self) -> ViewWidget | None:
+        views = [v for v in self.query("#view-host > ViewWidget").results(ViewWidget) if v.is_attached]
+        return views[-1] if views else None
+
     async def show_view(self, view: View | None, push: bool = False) -> None:
-        if push and self.current_view is not None:
-            self.history.append(self.current_view.path)
-        self.current_view = view
-        host = self.query_one("#view-host", Vertical)
-        await host.remove_children()
-        self._rows.clear()
-        if view is None:
-            await host.mount(Static("This dashboard has no views.", id="status"))
-        else:
-            notice = self.dashboard.notice if self.dashboard else None
-            await host.mount(ViewWidget(view, self.hass, notice=notice, id="view"))
-            if not view.subview:
-                tabs = self.query_one("#view-tabs", Tabs)
-                with tabs.prevent(Tabs.TabActivated):
-                    tabs.active = f"view-{view.path}"
-        self.refresh_sidebar()
+        # Serialized: tab clicks, Enter on an area and Esc can all switch views back to back.
+        async with self._view_lock:
+            if push and self.current_view is not None:
+                self.history.append(self.current_view.path)
+            self.current_view = view
+            host = self.query_one("#view-host", Vertical)
+            await host.remove_children()
+            self._rows.clear()
+            if view is None:
+                await host.mount(Static("This dashboard has no views."))
+            else:
+                notice = self.dashboard.notice if self.dashboard else None
+                await host.mount(ViewWidget(view, self.hass, notice=notice))
+                if not view.subview:
+                    tabs = self.query_one("#view-tabs", Tabs)
+                    with tabs.prevent(Tabs.TabActivated):
+                        tabs.active = f"view-{view.path}"
+            self.refresh_sidebar()
 
     @on(ViewWidget.Laidout)
     def _index_rows(self) -> None:
         self._rows.clear()
         for lst in self.query(EntityList):
             for index, item in enumerate(lst.items):
-                if item.entity_id:
-                    self._rows.setdefault(item.entity_id, []).append((lst, index))
+                for eid in {item.entity_id, *item.members} - {None}:
+                    self._rows.setdefault(eid, []).append((lst, index))
         if self.focused is None or self.focused is self.query_one("#sidebar"):
-            first = next(iter(self.query("#view EntityList")), None)
+            first = next(iter(self.query("#view-host EntityList")), None)
             if first is not None and self.query_one("#main", ContentSwitcher).current == "dashboard":
                 first.focus()
 
@@ -217,7 +231,20 @@ class HATuiApp(App):
     # ------------------------------------------------------------------ #
     # live updates
     # ------------------------------------------------------------------ #
+    async def refresh_hass(self) -> None:
+        """Reload states and registries; changes arriving meanwhile are replayed on top of the snapshot."""
+        self._buffer = [] if self._buffer is None else self._buffer
+        try:
+            await self.hass.refresh(self.client)
+        finally:
+            buffered, self._buffer = self._buffer, None
+        for new, old in buffered:
+            self._on_state_changed(new, old)
+
     def _on_state_changed(self, new: dict[str, Any], old: dict[str, Any] | None) -> None:
+        if self._buffer is not None:
+            self._buffer.append((new, old))
+            return
         self.hass.apply_state(new)
         for pane in self.query(ActivityPane):
             pane.record(new, old)
@@ -229,7 +256,7 @@ class HATuiApp(App):
     def _flush(self) -> None:
         self._flush_scheduled = False
         pending, self._pending = self._pending, set()
-        view = next(iter(self.query("#view").results(ViewWidget)), None)
+        view = self.active_view()
         entities = next(iter(self.query(EntitiesPane)), None)
         for eid in pending:
             for lst, index in self._rows.get(eid, []):
@@ -255,6 +282,13 @@ class HATuiApp(App):
         self._call(domain, service, entity_id, data or {})
 
     @work(group="calls")
+    async def _call_target(self, domain: str, service: str, target: dict[str, Any]) -> None:
+        try:
+            await self.client.call_service(domain, service, {}, target)
+        except HAError as exc:
+            self.notify(f"{domain}.{service} failed: {exc}", severity="error", timeout=6)
+
+    @work(group="calls")
     async def _call(self, domain: str, service: str, entity_id: str | None, data: dict[str, Any]) -> None:
         target = {"entity_id": entity_id} if entity_id else None
         try:
@@ -268,7 +302,11 @@ class HATuiApp(App):
     @on(EntityList.Activated)
     async def _activated(self, event: EntityList.Activated) -> None:
         item = event.item
-        if item.kind == "area":
+        if item.kind == "area_lights" and item.area_id:
+            any_on = any((self.hass.states.get(m) or {}).get("state") == "on" for m in item.members)
+            self._call_target("light", "turn_off" if any_on else "turn_on", {"area_id": item.area_id})
+            return
+        if item.kind in ("area", "summary", "navigate"):
             if self.dashboard and item.path and (view := self.dashboard.view_by_path(item.path)):
                 await self.show_view(view, push=True)
             return
@@ -301,7 +339,7 @@ class HATuiApp(App):
         if pane == "entities":
             self.query_one("#entities DataTable").focus()
         elif pane == "dashboard":
-            first = next(iter(self.query("#view EntityList")), None)
+            first = next(iter(self.query("#view-host EntityList")), None)
             if first is not None:
                 first.focus()
         self.refresh_sidebar()
@@ -320,7 +358,7 @@ class HATuiApp(App):
     @work(exclusive=True, group="reload")
     async def action_reload(self) -> None:
         self.notify("Reloading…", timeout=1)
-        await self.hass.refresh(self.client)
+        await self.refresh_hass()
         await self.load_dashboard()
         self.query_one(EntitiesPane).populate()
 
@@ -356,7 +394,9 @@ class HATuiApp(App):
 
     def go_to_card(self, index: int) -> None:
         self.action_show_pane("dashboard")
-        view = self.query("#view").first(ViewWidget)
+        view = self.active_view()
+        if view is None:
+            return
         card = view.card_widget(index)
         if card is None:
             return

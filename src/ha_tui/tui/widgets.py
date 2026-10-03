@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -12,10 +13,12 @@ from textual import events
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
+from textual.widget import MountError
 from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
 
-from ..format import icon, state_style, state_text
+from ..format import STYLE_ACTIVE, STYLE_INACTIVE, STYLE_VALUE, icon, state_style, state_text
+from ..lovelace.home import SUMMARY_ICONS, SUMMARY_LABELS, area_text, summary_text
 from ..lovelace.model import Card, Item, View
 
 if TYPE_CHECKING:
@@ -31,7 +34,26 @@ def row_prompt(hass: Hass, item: Item) -> Table:
     grid.add_column(justify="right", no_wrap=True, overflow="ellipsis", max_width=28)
     if item.kind == "area" and item.area_id:
         area = hass.areas.get(item.area_id, {})
-        grid.add_row("🏠", item.name or area.get("name", item.area_id), Text("›", style="dim"))
+        detail = Text(area_text(hass, item.area_id, item.members), style=STYLE_VALUE)
+        grid.add_row("🏠", item.name or area.get("name", item.area_id), detail + Text("  ›", style="dim"))
+        return grid
+    if item.kind == "summary" and item.key:
+        text, attention = summary_text(hass, item.key, item.members)
+        arrow = Text("  ›", style="dim") if item.path else Text("")
+        detail = Text(text, style=STYLE_ACTIVE if attention else STYLE_INACTIVE) + arrow
+        grid.add_row(
+            SUMMARY_ICONS.get(item.key, "•"), Text(SUMMARY_LABELS.get(item.key, item.key), style="bold"), detail
+        )
+        return grid
+    if item.kind == "area_lights":
+        on = sum(1 for m in item.members if (hass.states.get(m) or {}).get("state") == "on")
+        label = (
+            Text(f"{on} on · ⏻ all off", style=STYLE_ACTIVE) if on else Text("all off · ⏻ all on", style=STYLE_INACTIVE)
+        )
+        grid.add_row("⏻", Text("All lights", style="italic"), label)
+        return grid
+    if item.kind == "navigate":
+        grid.add_row("📂", item.name or item.path or "", Text("›", style="dim"))
         return grid
     eid = item.entity_id or ""
     st = hass.states.get(eid)
@@ -183,6 +205,7 @@ class ViewWidget(VerticalScroll):
     ViewWidget > #columns { height: auto; }
     ViewWidget > #columns > Vertical { height: auto; width: 1fr; margin-right: 1; }
     ViewWidget > #notice { color: $warning; margin-bottom: 1; }
+    ViewWidget > #header { color: $text-accent; margin-bottom: 1; }
     """
 
     def __init__(self, view: View, hass: Hass, notice: str | None = None, **kwargs: Any) -> None:
@@ -191,8 +214,11 @@ class ViewWidget(VerticalScroll):
         self.hass = hass
         self.notice = notice
         self.columns = 0
+        self._layout_lock = asyncio.Lock()
 
     def compose(self) -> ComposeResult:
+        if self.view.header:
+            yield Static(f"[b]{self.view.header}[/b]", id="header")
         if self.notice or self.view.error:
             yield Static(self.view.error or self.notice or "", id="notice")
         if self.view.badges:
@@ -220,29 +246,38 @@ class ViewWidget(VerticalScroll):
             self.call_after_refresh(self.layout_cards)
 
     async def layout_cards(self) -> None:
-        container = self.query_one("#columns", Horizontal)
-        focused = self.app.focused
-        refocus = None
-        if isinstance(focused, EntityList) and focused in container.query(EntityList):
-            refocus = (focused.key_prefix, focused.highlighted)
-        await container.remove_children()
-        cols = [Vertical() for _ in range(self.columns)]
-        heights = [0] * self.columns
-        placement: list[list[CardWidget]] = [[] for _ in range(self.columns)]
-        for i, card in enumerate(self.view.cards):
-            widget = CardWidget(card, self.hass, i)
-            col = heights.index(min(heights))
-            placement[col].append(widget)
-            heights[col] += widget.estimated_height()
-        await container.mount_all(cols)
-        for col, widgets in zip(cols, placement, strict=True):
-            await col.mount_all(widgets)
-        self.post_message(self.Laidout())
-        if refocus:
-            for lst in self.query(EntityList):
-                if lst.key_prefix == refocus[0]:
-                    lst.focus()
-                    lst.highlighted = refocus[1]
+        # Serialized: a resize can re-trigger this while the previous layout is still mounting.
+        async with self._layout_lock:
+            if not self.is_attached:
+                return
+            container = next(iter(self.query("#columns").results(Horizontal)), None)
+            if container is None:
+                return
+            focused = self.app.focused
+            refocus = None
+            if isinstance(focused, EntityList) and focused in container.query(EntityList):
+                refocus = (focused.key_prefix, focused.highlighted)
+            placement: list[list[CardWidget]] = [[] for _ in range(self.columns)]
+            heights = [0] * self.columns
+            for i, card in enumerate(self.view.cards):
+                widget = CardWidget(card, self.hass, i)
+                col = heights.index(min(heights))
+                placement[col].append(widget)
+                heights[col] += widget.estimated_height()
+            await container.remove_children()
+            # The view may have been replaced (fast navigation) while children were removed.
+            if not self.is_attached or not container.is_attached:
+                return
+            try:
+                await container.mount_all([Vertical(*widgets) for widgets in placement])
+            except MountError:
+                return
+            self.post_message(self.Laidout())
+            if refocus:
+                for lst in self.query(EntityList):
+                    if lst.key_prefix == refocus[0]:
+                        lst.focus()
+                        lst.highlighted = refocus[1]
 
     class Laidout(Message):
         pass

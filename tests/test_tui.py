@@ -22,7 +22,7 @@ async def wait_for(pilot, predicate, limit: float = 5.0) -> None:
         await pilot.pause(0.05)
 
 
-def make_app(mock: MockHA, dashboard: str | None = None) -> HATuiApp:
+def make_app(mock: MockHA, dashboard: str | None = "default") -> HATuiApp:
     return HATuiApp(Settings(url=mock.url, token=TOKEN), dashboard=dashboard)
 
 
@@ -132,7 +132,7 @@ async def test_reconnects(mock_ha: MockHA):
     async with app.run_test(size=(140, 50)) as pilot:
         await wait_for(pilot, lambda: app._loaded)
         await mock_ha.drop_connections()
-        await wait_for(pilot, lambda: app.client.connected is False or len(mock_ha.connections) == 0)
+        await wait_for(pilot, lambda: len(mock_ha.connections) == 0)
         await wait_for(pilot, lambda: app.client.connected and len(mock_ha.connections) == 1, limit=8)
         await mock_ha.set_state("switch.coffee", "on")
         await wait_for(pilot, lambda: row_states(app, "Kitchen")[1] == "On")
@@ -158,3 +158,31 @@ async def test_more_info_with_unset_select(mock_ha: MockHA):
         assert select.value is Select.NULL
         select.value = "Candle"
         await wait_for(pilot, lambda: mock_ha.calls and mock_ha.calls[-1]["service_data"] == {"effect": "Candle"})
+
+
+async def test_closing_dialog_while_history_loads(mock_ha: MockHA):
+    """Regression: the history worker mounted into a dialog that had already been closed."""
+    mock_ha.history_delay = 0.3
+    app = make_app(mock_ha)
+    async with app.run_test(size=(140, 50)) as pilot:
+        await wait_for(pilot, lambda: app._loaded)
+        app.open_more_info("sensor.kitchen_temp")
+        await wait_for(pilot, lambda: isinstance(app.screen, MoreInfo))
+        await pilot.press("escape")
+        await pilot.pause(0.6)
+        assert app._exception is None
+
+
+async def test_rapid_view_switching(mock_ha: MockHA):
+    """Regression: a replaced view kept laying out its cards and mounted into a removed container."""
+    app = make_app(mock_ha, dashboard="home")
+    async with app.run_test(size=(140, 50)) as pilot:
+        await wait_for(pilot, lambda: app._loaded)
+        # Pause just long enough for each view's first layout to start before replacing it.
+        for delay in (0, 0.001, 0.005, 0.01, 0.02):
+            for view in app.dashboard.views:
+                await app.show_view(view)
+                await pilot.pause(delay)
+        await pilot.pause(0.5)
+        assert app._exception is None
+        assert app.query(CardWidget)

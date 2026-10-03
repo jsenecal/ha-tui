@@ -354,6 +354,10 @@ def generate_areas_overview(hass: Hass, config: Config) -> Config:
 def generate_dashboard(strategy: Config, hass: Hass) -> tuple[Config, str | None]:
     """Returns (raw lovelace config, optional notice for the user)."""
     stype = strategy.get("type", "")
+    if stype == "home":
+        from .home import generate_home_dashboard
+
+        return generate_home_dashboard(strategy, hass), None
     if stype == "original-states":
         return {"views": [{"strategy": strategy}]}, None
     if stype == "areas":
@@ -393,6 +397,10 @@ def generate_dashboard(strategy: Config, hass: Hass) -> tuple[Config, str | None
 
 
 def generate_view(strategy: Config, hass: Hass) -> Config:
+    from .home import generate_home_view
+
+    if (generated := generate_home_view(strategy, hass)) is not None:
+        return generated
     stype = strategy.get("type", "")
     if stype == "original-states":
         return generate_default_view(hass, strategy)

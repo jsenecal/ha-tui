@@ -14,6 +14,7 @@ from typing import Any
 
 from ..client import HAClient, HACommandError
 from ..hass import Hass
+from .home import area_members, summary_members, summary_text
 from .model import Card, Dashboard, Item, View
 from .strategies import StrategyError, generate_dashboard, generate_view
 
@@ -85,8 +86,29 @@ class _Builder:
             area_id = card.get("area")
             if area_id in self.hass.areas:
                 self.add(
-                    Item(kind="area", area_id=area_id, path=card.get("navigation_path"), name=_plain(card.get("name")))
+                    Item(
+                        kind="area",
+                        area_id=area_id,
+                        path=card.get("navigation_path"),
+                        name=_plain(card.get("name")),
+                        members=area_members(self.hass, area_id),
+                    )
                 )
+            return
+        if ctype in ("home-summary", "repairs", "updates"):
+            key = card.get("summary") or ctype
+            members = summary_members(self.hass, key)
+            if card.get("hide_empty") and not summary_text(self.hass, key, members)[1]:
+                return
+            self.add(Item(kind="summary", key=key, path=card.get("navigation_path"), members=members))
+            return
+        if ctype == "ha-tui:area-lights":
+            lights = [m for m in area_members(self.hass, card["area"]) if m.startswith("light.")]
+            if lights:
+                self.add(Item(kind="area_lights", area_id=card["area"], members=lights))
+            return
+        if ctype == "ha-tui:navigate":
+            self.add(Item(kind="navigate", name=_plain(card.get("name")), path=card.get("navigation_path")))
             return
         if ctype == "map":
             self.add_entity_rows(card.get("entities"))
@@ -175,6 +197,7 @@ def convert_view(raw: Config, hass: Hass, index: int) -> View:
         cards=cards,
         badges=badges,
         subview=bool(raw.get("subview")),
+        header=raw.get("header") if isinstance(raw.get("header"), str) else None,
     )
 
 
@@ -203,9 +226,15 @@ def build_dashboard(raw: Config, hass: Hass, url_path: str | None, title: str) -
     return Dashboard(url_path=url_path, title=title, views=views, strategy=strategy, notice=notice)
 
 
+HOME = "home"
+
+
 async def list_dashboards(client: HAClient) -> list[tuple[str | None, str]]:
-    """(url_path, title) for every Lovelace dashboard, default one first."""
-    out: list[tuple[str | None, str]] = [(None, "Overview")]
+    """(url_path, title) for every dashboard: the Home panel (new Overview) first if present."""
+    out: list[tuple[str | None, str]] = []
+    if HOME in (await client.send("get_panels") or {}):
+        out.append((HOME, "Home (new Overview)"))
+    out.append((None, "Overview"))
     for dash in await client.list_dashboards():
         if dash.get("mode") == "yaml" and not dash.get("url_path"):
             continue
@@ -213,7 +242,35 @@ async def list_dashboards(client: HAClient) -> list[tuple[str | None, str]]:
     return out
 
 
+def default_dashboard(hass: Hass) -> str | None:
+    """The new Overview (Home panel) when the instance has it, else the default Lovelace dashboard."""
+    return HOME if HOME in hass.panels else None
+
+
+async def load_home_context(client: HAClient, hass: Hass) -> dict:
+    """What the Home panel fetches besides the registries: its config, predictions, repairs."""
+    try:
+        config = (await client.send("frontend/get_system_data", key="home") or {}).get("value") or {}
+    except HACommandError:
+        config = {}
+    try:
+        hass.common_controls = (await client.send("usage_prediction/common_control")).get("entities", [])
+    except HACommandError:
+        hass.common_controls = []
+    if hass.is_admin:
+        try:
+            issues = (await client.send("repairs/list_issues")).get("issues", [])
+            hass.repairs_count = sum(1 for i in issues if not i.get("ignored") and not i.get("dismissed_version"))
+        except HACommandError:
+            hass.repairs_count = 0
+    return config
+
+
 async def load_dashboard(client: HAClient, hass: Hass, url_path: str | None, title: str | None = None) -> Dashboard:
+    if url_path == HOME:
+        config = await load_home_context(client, hass)
+        raw = {"strategy": {**config, "type": "home", "home_panel": True}}
+        return build_dashboard(raw, hass, HOME, title or "Home")
     try:
         raw = await client.lovelace_config(url_path)
     except HACommandError as exc:

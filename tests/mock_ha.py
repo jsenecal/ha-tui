@@ -63,6 +63,14 @@ def initial_states() -> list[dict[str, Any]]:
         _state("person.alice", "home", friendly_name="Alice"),
         _state("sensor.outside", "12", friendly_name="Outside Temperature", unit_of_measurement="°C"),
         _state("binary_sensor.door", "off", friendly_name="Front Door", device_class="door"),
+        _state(
+            "sensor.door_battery",
+            "15",
+            friendly_name="Door Sensor Battery",
+            unit_of_measurement="%",
+            device_class="battery",
+        ),
+        _state("lock.front", "unlocked", friendly_name="Front Lock"),
     ]
 
 
@@ -79,7 +87,9 @@ ENTITY_REGISTRY = {
         {"ei": "scene.movie", "ai": "living_room", "pl": "homeassistant"},
         {"ei": "sensor.router_uptime", "ai": "kitchen", "ec": 1, "pl": "router"},
         {"ei": "automation.night", "pl": "automation"},
-        {"ei": "binary_sensor.door", "di": "dev_door", "pl": "zha"},
+        {"ei": "binary_sensor.door", "di": "dev_door", "pl": "zha", "en": "Contact"},
+        {"ei": "sensor.door_battery", "di": "dev_door", "pl": "zha", "ec": 1},
+        {"ei": "lock.front", "ai": "living_room", "pl": "zwave"},
     ],
 }
 DEVICES = [
@@ -131,6 +141,9 @@ class MockHA:
     def __init__(self) -> None:
         self.states = {s["entity_id"]: s for s in initial_states()}
         self.calls: list[dict[str, Any]] = []
+        self.panels = ["lovelace", "home", "light", "climate", "security", "maintenance"]
+        self.home_config: dict[str, Any] | None = None
+        self.history_delay = 0.0
         self.server: Server | None = None
         self.port = 0
         self.connections: set[ServerConnection] = set()
@@ -230,13 +243,30 @@ class MockHA:
             await ok()
             rendered = msg["template"].replace("{{ states('sensor.outside') }}", self.states["sensor.outside"]["state"])
             await self._send(ws, {"id": mid, "type": "event", "event": {"result": rendered, "listeners": {}}})
+        elif mtype == "get_panels":
+            await ok({k: {"component_name": k, "url_path": k} for k in self.panels})
+        elif mtype == "auth/current_user":
+            await ok({"id": "u1", "name": "Alice", "is_admin": True})
+        elif mtype == "usage_prediction/common_control":
+            await ok({"entities": ["switch.coffee", "light.kitchen", "light.gone"]})
+        elif mtype == "frontend/get_system_data":
+            await ok({"value": self.home_config})
+        elif mtype == "repairs/list_issues":
+            await ok({"issues": [{"issue_id": "a", "ignored": False}, {"issue_id": "b", "ignored": True}]})
         elif mtype == "history/history_during_period":
+            await asyncio.sleep(self.history_delay)
             eid = msg["entity_ids"][0]
             await ok({eid: [{"s": str(v), "lu": 0} for v in (20, 21, 21.5, 22, 21.5)]})
         elif mtype == "call_service":
             await self._call_service(msg, ok, fail)
         else:
             await ok()
+
+    def _area_of(self, eid: str) -> str | None:
+        entry = next((e for e in ENTITY_REGISTRY["entities"] if e["ei"] == eid), None)
+        if entry is None:
+            return None
+        return entry.get("ai") or _device_area(entry.get("di"))
 
     async def _call_service(self, msg: dict[str, Any], ok, fail) -> None:
         domain, service = msg["domain"], msg["service"]
@@ -249,7 +279,12 @@ class MockHA:
             await ok({"context": {}, "response": {"weather.home": {"forecast": []}}})
             return
         await ok({"context": {}})
-        targets = (msg.get("target") or {}).get("entity_id") or []
+        target = msg.get("target") or {}
+        targets = target.get("entity_id") or []
+        if target.get("area_id"):
+            targets = [
+                eid for eid in self.states if eid.startswith(f"{domain}.") and self._area_of(eid) == target["area_id"]
+            ]
         for eid in [targets] if isinstance(targets, str) else targets:
             current = self.states.get(eid)
             if current is None:
@@ -272,6 +307,10 @@ class MockHA:
                 await self.set_state(eid, current["state"], temperature=data["temperature"])
             elif service == "set_hvac_mode":
                 await self.set_state(eid, data["hvac_mode"])
+
+
+def _device_area(device_id: str | None) -> str | None:
+    return next((d["area_id"] for d in DEVICES if d["id"] == device_id), None)
 
 
 class ThreadedMockHA:

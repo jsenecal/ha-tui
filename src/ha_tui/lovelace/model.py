@@ -11,8 +11,13 @@ class Item:
 
     kind:
       entity    an entity row (entity_id, optional display name override)
-      area      an area summary that navigates to `path`
-      markdown  markdown text; rendered server-side if it contains a template
+      area        an area summary that navigates to `path`
+      summary     a home summary (`key`: light, climate, security...) computed from `members`
+      area_lights turn all lights of `area_id` on/off
+      navigate    a plain link to `path`
+      markdown    markdown text; rendered server-side if it contains a template
+
+    `members` lists the entities a computed row depends on, for live updates.
     """
 
     kind: str = "entity"
@@ -21,6 +26,8 @@ class Item:
     area_id: str | None = None
     path: str | None = None
     text: str | None = None
+    key: str | None = None
+    members: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -38,6 +45,7 @@ class View:
     badges: list[Item] = field(default_factory=list)
     subview: bool = False
     error: str | None = None
+    header: str | None = None
 
     def entity_ids(self) -> list[str]:
         ids = [i.entity_id for c in self.cards for i in c.items if i.entity_id]

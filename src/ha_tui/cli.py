@@ -23,7 +23,8 @@ from .client import HAClient, HAError
 from .config import CONFIG_PATH, ConfigError, Settings, load_settings, read_file, save_settings
 from .format import domain_of, humanize_time, icon, styled_state
 from .hass import Hass
-from .lovelace.resolve import list_dashboards, load_dashboard
+from .lovelace.home import SUMMARY_ICONS, SUMMARY_LABELS, area_text, summary_text
+from .lovelace.resolve import default_dashboard, list_dashboards, load_dashboard
 
 app = typer.Typer(
     help="Home Assistant dashboard and remote control for the terminal.",
@@ -409,7 +410,9 @@ def dashboards(ctx: typer.Context) -> None:
 @app.command()
 def dashboard(
     ctx: typer.Context,
-    url_path: Annotated[str | None, typer.Argument(help="Dashboard url_path (default dashboard if omitted).")] = None,
+    url_path: Annotated[
+        str | None, typer.Argument(help="Dashboard url_path; 'home' is the new Overview, 'default' the legacy one.")
+    ] = None,
     view: Annotated[str | None, typer.Option("--view", "-V", help="Only this view path.")] = None,
     states_: Annotated[bool, typer.Option("--states/--no-states", help="Show current states.")] = True,
 ) -> None:
@@ -417,7 +420,8 @@ def dashboard(
 
     async def go(client: HAClient) -> None:
         hass = await Hass.load(client)
-        dash = await load_dashboard(client, hass, url_path)
+        path = default_dashboard(hass) if url_path is None else (None if url_path == "default" else url_path)
+        dash = await load_dashboard(client, hass, path)
         label = f"[bold]{dash.title}[/bold]" + (f" [dim](strategy: {dash.strategy})[/dim]" if dash.strategy else "")
         tree = Tree(label)
         if dash.notice:
@@ -428,6 +432,8 @@ def dashboard(
             vnode = tree.add(
                 f"[bold cyan]{v.title}[/bold cyan] [dim]/{v.path}{' · subview' if v.subview else ''}[/dim]"
             )
+            if v.header:
+                vnode.add(f"[i]{v.header}[/i]")
             if v.error:
                 vnode.add(f"[red]{v.error}[/red]")
             for b in v.badges:
@@ -451,7 +457,18 @@ def dashboard(
                             line.append_text(styled_state(st, item.entity_id))
                         cnode.add(line)
                     elif item.kind == "area" and item.area_id:
-                        cnode.add(f"🏠 {hass.areas[item.area_id]['name']} [dim]→ {item.path}[/dim]")
+                        detail = area_text(hass, item.area_id, item.members)
+                        cnode.add(f"🏠 {hass.areas[item.area_id]['name']}  {detail} [dim]→ {item.path}[/dim]")
+                    elif item.kind == "summary" and item.key:
+                        text, _ = summary_text(hass, item.key, item.members)
+                        target = f" [dim]→ {item.path}[/dim]" if item.path else ""
+                        cnode.add(
+                            f"{SUMMARY_ICONS.get(item.key, '•')} [b]{SUMMARY_LABELS[item.key]}[/b]  {text}{target}"
+                        )
+                    elif item.kind == "area_lights":
+                        cnode.add("⏻ [i]All lights[/i]")
+                    elif item.kind == "navigate":
+                        cnode.add(f"📂 {item.name} [dim]→ {item.path}[/dim]")
                     elif item.kind == "markdown" and item.text:
                         first = item.text.strip().splitlines()[0]
                         cnode.add(f"[dim]markdown:[/dim] {first[:70]}")

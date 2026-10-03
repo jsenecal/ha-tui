@@ -15,7 +15,10 @@ async def test_default_dashboard_falls_back_to_original_states(client: HAClient,
     assert dash.strategy == "original-states"
     assert [v.title for v in dash.views] == ["Home"]
     assert _cards(dash.views[0]) == [
-        ("Living Room", ["cover.blinds", "light.living_room", "scene.movie", "climate.thermostat", "media_player.tv"]),
+        (
+            "Living Room",
+            ["cover.blinds", "lock.front", "light.living_room", "scene.movie", "climate.thermostat", "media_player.tv"],
+        ),
         ("Kitchen", ["light.kitchen", "switch.coffee", "sensor.kitchen_temp"]),
         (None, ["person.alice"]),
         ("Binary sensor", ["binary_sensor.door"]),
